@@ -94,7 +94,7 @@ for i, val in enumerate(Z):
     )
 
 ZP = np.array(ZP, dtype=np.float64).T
-ZP = ZP / np.linalg.norm(ZP)
+ZP = ZP / np.max(np.abs(ZP))
 
 # X, Y = np.mgrid[
 #     price_filter_range[0] : price_filter_range[1] + 1 : 1, 0 : len(ord_data) : 1
@@ -110,7 +110,7 @@ ZP = ZP / np.linalg.norm(ZP)
 
 print("Saving data")
 
-np.save("orderbook1.npy", ZP)
+np.save("orderbook_shorter.npy", ZP)
 
 print("Finished")
 
