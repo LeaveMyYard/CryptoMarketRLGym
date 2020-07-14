@@ -161,7 +161,9 @@ class OrderbookMarketmaker(gym.Env):
                 and bankruptcy_price > 0
             ):
                 return (
-                    self._current_data,
+                    self._current_data.reshape(
+                        (self.orderbook_depth * 2, self.orderbook_hist, 1)
+                    ),
                     0,
                     True,
                     {
@@ -178,7 +180,9 @@ class OrderbookMarketmaker(gym.Env):
                 )
 
         return (
-            self._current_data,
+            self._current_data.reshape(
+                (self.orderbook_depth * 2, self.orderbook_hist, 1)
+            ),
             self._balance - last_balance,
             self._current_timestep == self.data.shape[1],
             {
@@ -286,7 +290,7 @@ class OrderbookMarketmaker(gym.Env):
                 order.volume + self._current_position["volume"]
             )
             self._current_position["average_price"] /= self._current_position["volume"]
-        elif self._current_position["volume"] >= order.volume:
+        elif abs(self._current_position["volume"]) >= abs(order.volume):
             self._current_position["volume"] += order.volume
             self._balance += order.volume * (
                 -1 / self._current_position["average_price"] + 1 / order.price
@@ -295,10 +299,10 @@ class OrderbookMarketmaker(gym.Env):
             self._balance += self._current_position["volume"] * (
                 1 / self._current_position["average_price"] - 1 / order.price
             )
-            self._current_position["volume"] -= order.volume
+            self._current_position["volume"] += order.volume
             self._current_position["average_price"] = order.price
 
-        self._balance -= self.maker_fee * abs(order.volume)
+        self._balance -= self.maker_fee * abs(order.volume) / order.price
         self.orders_filled += 1
 
     def reset(self):
@@ -320,6 +324,10 @@ class OrderbookMarketmaker(gym.Env):
         self.orders_filled = 0
         self.orders_canceled = 0
 
+        return self._current_data.reshape(
+            (self.orderbook_depth * 2, self.orderbook_hist, 1)
+        )
+
     def render(self, mode="human", close=False):
         """
         render [summary]
@@ -334,6 +342,7 @@ class OrderbookMarketmaker(gym.Env):
             [type]: [description]
         """
         if mode == "human":
+            # print("Warning: Long human render")
             cv2.imshow("env", self.render(mode="rgb_array"))
             cv2.waitKey(1)
         elif mode == "rgb_array":
@@ -351,18 +360,19 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import datetime
 
-    env = OrderbookMarketmaker("orderbook_shorter.npy")
+    env = OrderbookMarketmaker("orderbook.npy")
     env.reset()
     i = 0
+    tests = []
     t = datetime.datetime.now()
 
     while True:
         obs, reward, done, info = env.step(env.action_space.sample())
-        env.render()
+        # env.render()
         i += 1
 
         if (datetime.datetime.now() - t).total_seconds() >= 1:
-            # print("FPS:", i)
+            print("FPS:", i)
             i = 0
             t = datetime.datetime.now()
         # print(env.render(mode="rgb_array"), end=" ")
@@ -370,8 +380,12 @@ if __name__ == "__main__":
         # plt.show()
         if done:
             print(info)
-            print("Episode finished, reset.")
+            plt.clf()
+            plt.plot(list(range(len(tests))), tests)
+            plt.gcf().savefig("plot.png")
+            tests.append(info["balance"] + info["unr_profit"])
+            # print("Episode finished, reset.")
             env.reset()
-        else:
-            print(info, end="                      \r")
+        # else:
+        # print(info, end="                      \r")
 

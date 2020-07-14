@@ -1,10 +1,7 @@
 import os
 import pickle
 
-import matplotlib.pyplot as plt
 import numpy as np
-from mayavi import mlab
-from mpl_toolkits.mplot3d import Axes3D
 
 orderbook_dir = r"C:\Users\blackbox1\Documents\GitHub\ArbitrageTrader\orderbook"
 price_points = 50
@@ -67,13 +64,6 @@ for i, val in enumerate(ord_data):
 
 del ord_data
 
-# last_price = (
-#     min([k for k, v in Z[-1].items() if v < 0])
-#     + max([k for k, v in Z[-1].items() if v > 0])
-# ) // 2
-
-# price_filter_range = [last_price - price_points, last_price + price_points - 1]
-
 price_filter_range = (np.floor(total_min_price), np.ceil(total_max_price))
 
 print(f"Cutting data from {price_filter_range[0]} to {price_filter_range[1]} ...")
@@ -96,18 +86,6 @@ for i, val in enumerate(Z):
 ZP = np.array(ZP, dtype=np.float64).T
 ZP = ZP / np.max(np.abs(ZP))
 
-# X, Y = np.mgrid[
-#     price_filter_range[0] : price_filter_range[1] + 1 : 1, 0 : len(ord_data) : 1
-# ]
-
-# Z = np.array(Z).T
-
-# print(Z, Z.shape)
-
-# Z = Z / np.max(np.abs(Z).flatten())
-
-# print(X.shape, Y.shape, ZP.shape)
-
 print("Saving data")
 
 np.save("orderbook_shorter.npy", ZP)
@@ -115,12 +93,3 @@ np.save("orderbook_shorter.npy", ZP)
 print("Finished")
 
 print("Final data shape:", ZP.shape)
-
-
-# s = mlab.barchart(X, Y, ZP)
-# mlab.show()
-
-# ax.plot_surface(X, Y, ZP, cmap=plt.cm.Spectral)
-
-
-# plt.show()
