@@ -244,9 +244,10 @@ public:
                 return 0;
             }
         }
+        
+        int r = int(this->balanceBTC * 10000000);
 
-
-        return int(this->balanceBTC * 10000000);
+        return r > 0 ? r : 0;
     }
 };
 

@@ -6,11 +6,14 @@ import numpy as np
 import pandas as pd
 import itertools
 import argparse
+import sys
 import typing
 import threading
 import time
 import sqlite3
+from params import get_params
 from pycuda.compiler import SourceModule
+from pycuda._driver import Context
 
 
 class gpuThread(threading.Thread):
@@ -29,12 +32,31 @@ class gpuThread(threading.Thread):
 
 
 class gpuCalculationThreaded(gpuThread):
-    def __init__(self, gpuid: int, code: str, *args, **kwargs):
+    def __init__(
+        self,
+        gpuid: int,
+        code: str,
+        pre_input: typing.List[np.ndarray] = None,
+        *args,
+        **kwargs,
+    ):
         kwargs["target"] = self.target_func
         super().__init__(gpuid, *args, **kwargs)
 
         self.mod = SourceModule(open(f"cuda/{code}").read())
         self.simulate = self.mod.get_function("start")
+        t = time.time()
+        self.pre_input = []
+        print(f"GPU[{gpuid}] Copying pre-input memory to device...")
+        if pre_input is not None:
+            for a in pre_input:
+                a_bytes = a.size * a.dtype.itemsize
+                a_gpu = drv.mem_alloc(a_bytes)
+                drv.memcpy_htod(a_gpu, a)
+                self.pre_input.append(a_gpu)
+        print(f"GPU[{gpuid}] Finished after {round(time.time() - t, 2)} seconds")
+        self.args = args
+        self.kwargs = kwargs
 
     def target_func(
         self,
@@ -46,98 +68,124 @@ class gpuCalculationThreaded(gpuThread):
         self.simulate(
             *[drv.Out(o) for o in output],
             *[drv.In(i) for i in inp],
+            *self.pre_input,
             block=block,
             grid=grid,
         )
 
 
-def _arange(start: float, stop: float, step: float) -> np.ndarray:
-    return np.arange(start=start, stop=stop + step, step=step)
-
-
 def main():
-    order_pairs_param = _arange(1, 30, 1)
-    order_start_size_param = _arange(25, 150, 25)
-    order_step_size_param = _arange(0, 300, 25)
-    interval_param = _arange(0.0025, 0.02, 0.0025) * 1000000
-    min_spread_param = _arange(0.0025, 0.02, 0.0025) * 1000000
-    min_position_param = np.array([-1000])  # _arange(-4500, 0, 500)
-    max_position_param = np.array([1000])  # _arange(4500, 0, -500)
-
-    inp_total = np.array(
-        list(
-            itertools.product(
-                order_pairs_param,
-                order_start_size_param,
-                order_step_size_param,
-                interval_param,
-                min_spread_param,
-                min_position_param,
-                max_position_param,
-            )
-        ),
-        dtype=np.int64,
-    )
+    inp_total = get_params()
 
     parser = argparse.ArgumentParser(description="GPU trading simulation tester")
 
     parser.add_argument("--gpu", action="store", dest="gpuid", type=int)
-    parser.add_argument("--gpucount", action="store", dest="gpucount", type=int)
     parser.add_argument("--data", action="store", dest="data_location", type=str)
     parser.add_argument("--datasize", action="store", dest="data_size", type=int)
+    parser.add_argument("--batchsize", action="store", dest="batch_size", type=int)
 
     args = parser.parse_args()
 
-    print("Loading data")
+    print(f"GPU[{args.gpuid}] Loading data")
     data = pd.read_csv(args.data_location).values[-args.data_size :, 2:]
-    print("Loaded", len(data))
+    print(f"GPU[{args.gpuid}] Loaded", len(data))
 
     outside_global_data = (data * 10000).astype(np.int64)
     data_size = np.array([data.shape[0]]).reshape((1,))
 
-    def simulate_gpu(inp, gpuid):
-        result = np.ones((inp.shape[0]), dtype=np.int32)
-        thread = gpuCalculationThreaded(
-            gpuid=gpuid,
-            code="gpu_grid_simulation.cu",
-            args=[
-                [inp, outside_global_data, data_size],
-                [result],
-                (1, 1, 1),
-                (1, inp.shape[0]),
-            ],
-        )
-        thread.start()
-        thread.join()
+    gpu_threads = {}
 
+    def simulate_gpu(inp, gpuid):
+        nonlocal gpu_threads
+
+        result = np.ones((inp.shape[0]), dtype=np.int32)
+        if gpuid not in gpu_threads:
+            thread = gpuCalculationThreaded(
+                gpuid=gpuid,
+                code="gpu_grid_simulation.cu",
+                pre_input=[outside_global_data, data_size],
+                args=[],
+            )
+            gpu_threads[gpuid] = thread
+        else:
+            thread = gpu_threads[gpuid]
+
+        thread.target_func([inp], [result], (1, 1, 1), (1, inp.shape[0]))
         return result.reshape(inp.shape[0]) / 10000000
 
-    # conn = sqlite3.connect("research.db")
+    conn = sqlite3.connect("research.db")
+    cursor = conn.cursor()
 
-    start = args.gpuid * inp_total.shape[0] // args.gpucount
-    end = (args.gpuid + 1) * inp_total.shape[0] // args.gpucount
+    print(f"GPU[{args.gpuid}] Starting a simulation...")
 
-    print(f"Running a GPU[{args.gpuid}] simulation...")
-    b = []
+    cursor.execute("SELECT COUNT(batchID) FROM BatchesData")
 
-    for sr in range(start, end, 10000):
+    (total,) = cursor.fetchone()
+
+    st = time.time()
+
+    while True:
         t = time.time()
 
-        b += list(simulate_gpu(inp_total[sr : min(sr + 10000, end)], args.gpuid))
+        try:
+            cursor.executescript("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+        except sqlite3.OperationalError:
+            continue
+
+        conn.commit()
+
+        cursor.execute(
+            "SELECT batchID, start, end FROM BatchesData WHERE finished = 0 LIMIT 1"
+        )
+        fetch = cursor.fetchone()
+        if fetch is None:
+            break
+
+        batch_id, start, end = fetch
+
+        cursor.execute(
+            "UPDATE BatchesData SET finished = 1 WHERE batchID = ?", (batch_id,)
+        )
+        cursor.execute("PRAGMA locking_mode = NORMAL")
+        conn.commit()
 
         print(
-            f"GPU[{args.gpuid}]",
-            "It took:",
-            round(time.time() - t, 2),
-            "s",
-            f"| {len(b)}/{(end - start)} [{round(100 * len(b) / (end - start), 2)}/100.00%]",
+            f"GPU[{args.gpuid}] Taken batch {batch_id} ({start}:{end}) [{round(100 * batch_id / total, 2)}%]"
         )
-    best = max(b)
+
+        res = simulate_gpu(inp_total[start:end], args.gpuid)
+
+        print(
+            f"GPU[{args.gpuid}] Batch {batch_id} took {round(time.time() - t, 2)} seconds"
+        )
+
+        for i, result in enumerate(res):
+            cursor.execute(
+                "INSERT OR IGNORE INTO SimulationResults VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    i + start,
+                    result,
+                    str(inp_total[i + start, 0]),
+                    str(inp_total[i + start, 1]),
+                    str(inp_total[i + start, 2]),
+                    str(inp_total[i + start, 3] / 1000000),
+                    str(inp_total[i + start, 4] / 1000000),
+                    str(inp_total[i + start, 5]),
+                    str(inp_total[i + start, 6]),
+                ),
+            )
+
+            if i % 100 == 0:
+                conn.commit()
+
+        conn.commit()
+
     print(
-        f"GPU[{args.gpuid}] The best iteration got {best}, with the settings: {inp_total[b.index(best)]}; average result: {round(sum(b) / len(b), 6)}"
+        f"GPU[{args.gpuid}] Took a total of {round(time.time() - st, 2)} seconds to process the data"
     )
-    print(np.array(b))
 
 
 if __name__ == "__main__":
     main()
+
+Context.pop()
